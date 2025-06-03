@@ -1,0 +1,110 @@
+import requests
+import json
+
+TENANT_ID = 'cf4b33d5-05ec-4cc0-a302-b6a710f2ac60'
+CLIENT_ID = '1810ae5f-2a36-4098-ac0e-7aac7471b801'
+CLIENT_SECRET = 'qxr8Q~B-LCHlI-bV.C5bVUU9yutD86HVlIElEdxw'
+
+AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
+SCOPE = "https://graph.microsoft.com/.default"
+
+def get_access_token():
+    data = {
+        'client_id': CLIENT_ID,
+        'scope': SCOPE,
+        'client_secret': CLIENT_SECRET,
+        'grant_type': 'client_credentials'
+    }
+    response = requests.post(AUTHORITY, data=data)
+    if response.status_code != 200:
+        print("Error response from Azure AD:", response.text)
+    response.raise_for_status()
+    return response.json()['access_token']
+
+def list_feature_updates(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    url = "https://graph.microsoft.com/beta/admin/windows/updates/catalog/entries?$filter=isof('microsoft.graph.windowsUpdates.featureUpdateCatalogEntry')"
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    data = response.json()
+    entries = data.get('value', [])
+    if not entries:
+        print("No feature update catalog entries found.")
+        return
+    print(json.dumps(entries, indent=2))
+
+def create_feature_update_policy(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    payload = {
+        "@odata.type": "#microsoft.graph.windowsUpdates.deployment",
+        "content": {
+            "@odata.type": "#microsoft.graph.windowsUpdates.catalogContent",
+            "catalogEntry": {
+                "@odata.type": "#microsoft.graph.windowsUpdates.featureUpdateCatalogEntry",
+                "id": "cd45877c-87a9-4ed1-b184-fd89230207b1"
+            }
+        },
+        "audience": {
+            "@odata.type": "#microsoft.graph.windowsUpdates.deploymentAudience",
+            "updateManagementGroups": [
+                {
+                    "id": "f80e981a-4c64-47a1-a7d7-726e95c11b72"  # Replace with your Azure AD group object ID
+                }
+            ]
+        },
+        "settings": {
+            "@odata.type": "microsoft.graph.windowsUpdates.deploymentSettings",
+            "schedule": {
+                "gradualRollout": {
+                    "@odata.type": "#microsoft.graph.windowsUpdates.rateDrivenRolloutSettings",
+                    "durationBetweenOffers": "P7D",
+                    "devicePerOffer": 100
+                }
+            },
+            "monitoring": {
+                "monitoringRules": [
+                    {
+                        "signal": "rollback",
+                        "threshold": 5,
+                        "action": "pauseDeployment"
+                    }
+                ]
+            },
+            "userExperience": {
+                "offerAsOptional": False,
+                "daysUntilForcedReboot": None
+            }
+        }
+    }
+    url = "https://graph.microsoft.com/beta/admin/windows/updates/deployments"
+    response = requests.post(url, headers=headers, data=json.dumps(payload))
+    print("Create policy response:", response.text)
+    response.raise_for_status()
+    print("Feature update deployment policy created successfully.")
+
+def main_menu():
+    token = get_access_token()
+    while True:
+        print("\nWindows Feature Update Menu")
+        print("1. List available feature updates (catalog)")
+        print("2. Create a new feature update deployment policy (using catalog id cd45877c-87a9-4ed1-b184-fd89230207b1)")
+        print("3. Exit")
+        choice = input("Enter your choice: ").strip()
+        if choice == "1":
+            list_feature_updates(token)
+        elif choice == "2":
+            create_feature_update_policy(token)
+        elif choice == "3":
+            print("Exiting.")
+            break
+        else:
+            print("Invalid choice. Please try again.")
+
+if __name__ == "__main__":
+    main_menu()
