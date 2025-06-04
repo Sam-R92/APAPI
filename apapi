@@ -21,90 +21,203 @@ def get_access_token():
     response.raise_for_status()
     return response.json()['access_token']
 
-def list_feature_updates(access_token):
+def list_expedite_quality_updates(access_token):
     headers = {
         'Authorization': f'Bearer {access_token}',
         'Content-Type': 'application/json'
     }
-    url = "https://graph.microsoft.com/beta/admin/windows/updates/catalog/entries?$filter=isof('microsoft.graph.windowsUpdates.featureUpdateCatalogEntry')"
+    url = ("https://graph.microsoft.com/beta/admin/windows/updates/catalog/entries"
+           "?$filter=isof('microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry') "
+           "and microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry/isExpeditable eq true"
+           "&$orderby=releaseDateTime desc&$top=2")
     response = requests.get(url, headers=headers)
     response.raise_for_status()
     data = response.json()
     entries = data.get('value', [])
     if not entries:
-        print("No feature update catalog entries found.")
+        print("No expedite quality update catalog entries found.")
         return
     print(json.dumps(entries, indent=2))
 
-def create_feature_update_policy(access_token):
+def get_recent_quality_update(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    url = (
+        "https://graph.microsoft.com/beta/admin/windows/updates/catalog/entries"
+        "?$expand=microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry/productRevisions"
+        "&$orderby=releaseDateTime desc&$top=1"
+    )
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    data = response.json()
+    entries = data.get('value', [])
+    if not entries:
+        print("No recent quality update found.")
+        return
+    print("Most Recent Quality Update:")
+    print(json.dumps(entries, indent=2))
+
+def create_aad_group(access_token, group_name):
     headers = {
         'Authorization': f'Bearer {access_token}',
         'Content-Type': 'application/json'
     }
     payload = {
-        "@odata.type": "#microsoft.graph.windowsUpdates.deployment",
+        "displayName": group_name,
+        "mailEnabled": False,
+        "mailNickname": group_name.replace(' ', '').lower(),
+        "securityEnabled": True,
+        "groupTypes": []
+    }
+    url = "https://graph.microsoft.com/v1.0/groups"
+    response = requests.post(url, headers=headers, data=json.dumps(payload))
+    response.raise_for_status()
+    group = response.json()
+    print(f"Created Azure AD group: {group.get('displayName')} (ID: {group.get('id')})")
+    return group.get('id')
+
+def create_deployment_for_recent_update(access_token, update_id, group_id):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    payload = {
         "content": {
-            "@odata.type": "#microsoft.graph.windowsUpdates.catalogContent",
             "catalogEntry": {
-                "@odata.type": "#microsoft.graph.windowsUpdates.featureUpdateCatalogEntry",
-                "id": "cd45877c-87a9-4ed1-b184-fd89230207b1"
+                "id": update_id
             }
         },
         "audience": {
-            "@odata.type": "#microsoft.graph.windowsUpdates.deploymentAudience",
-            "updateManagementGroups": [
-                {
-                    "id": "f80e981a-4c64-47a1-a7d7-726e95c11b72"  # Replace with your Azure AD group object ID
-                }
-            ]
+            "azureADGroupIds": [group_id]
         },
         "settings": {
-            "@odata.type": "microsoft.graph.windowsUpdates.deploymentSettings",
-            "schedule": {
-                "gradualRollout": {
-                    "@odata.type": "#microsoft.graph.windowsUpdates.rateDrivenRolloutSettings",
-                    "durationBetweenOffers": "P7D",
-                    "devicePerOffer": 100
-                }
-            },
-            "monitoring": {
-                "monitoringRules": [
-                    {
-                        "signal": "rollback",
-                        "threshold": 5,
-                        "action": "pauseDeployment"
-                    }
-                ]
+            "expedite": {
+                "isExpedited": True,
+                "isReadinessTest": False
             },
             "userExperience": {
-                "offerAsOptional": False,
-                "daysUntilForcedReboot": None
+                "daysUntilForcedReboot": 2
             }
         }
     }
     url = "https://graph.microsoft.com/beta/admin/windows/updates/deployments"
     response = requests.post(url, headers=headers, data=json.dumps(payload))
-    print("Create policy response:", response.text)
+    print("Create deployment response:", response.text)
     response.raise_for_status()
-    print("Feature update deployment policy created successfully.")
+    print("Deployment for recent quality update created successfully.")
 
-def main_menu():
+def get_existing_groups(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    url = "https://graph.microsoft.com/v1.0/groups?$select=id,displayName&$top=20"
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    groups = response.json().get('value', [])
+    return groups
+
+def agent_experience():
+    print("\nWelcome to the Windows Update Deployment Agent!")
+    print("This assistant will guide you through creating an Azure AD group and deploying the latest quality update.")
+    print("Type 'help' at any prompt for more information, or 'exit' to quit.\n")
     token = get_access_token()
     while True:
-        print("\nWindows Feature Update Menu")
-        print("1. List available feature updates (catalog)")
-        print("2. Create a new feature update deployment policy (using catalog id cd45877c-87a9-4ed1-b184-fd89230207b1)")
-        print("3. Exit")
-        choice = input("Enter your choice: ").strip()
-        if choice == "1":
-            list_feature_updates(token)
-        elif choice == "2":
-            create_feature_update_policy(token)
-        elif choice == "3":
-            print("Exiting.")
+        print("What would you like to do?")
+        print("1. List expedite quality updates")
+        print("2. Check most recent quality update")
+        print("3. Create a deployment for the most recent quality update")
+        print("4. Exit")
+        choice = input("Enter your choice: ").strip().lower()
+        if choice in ('4', 'exit', 'quit'):
+            print("Goodbye!")
             break
+        elif choice == 'help':
+            print("This agent helps you automate Windows Update deployments using Microsoft Graph API.")
+            continue
+        elif choice == '1':
+            list_expedite_quality_updates(token)
+        elif choice == '2':
+            get_recent_quality_update(token)
+        elif choice == '3':
+            # Step 1: Show the most recent update and ask for confirmation
+            headers = {
+                'Authorization': f'Bearer {token}',
+                'Content-Type': 'application/json'
+            }
+            url = (
+                "https://graph.microsoft.com/beta/admin/windows/updates/catalog/entries"
+                "?$expand=microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry/productRevisions"
+                "&$orderby=releaseDateTime desc&$top=1"
+            )
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            entries = data.get('value', [])
+            if not entries:
+                print("No recent quality update found.")
+                continue
+            update = entries[0]
+            print("Most recent quality update:")
+            print(json.dumps(update, indent=2))
+            confirm = input("Do you want to deploy this update? (yes/no): ").strip().lower()
+            if confirm not in ("yes", "y"):
+                print("Deployment cancelled.")
+                continue
+            update_id = update.get('id')
+            # Step 2: Choose existing group or create new
+            use_existing = input("Do you want to use an existing Azure AD group? (yes/no): ").strip().lower()
+            if use_existing in ("yes", "y"):
+                try:
+                    groups = get_existing_groups(token)
+                    if not groups:
+                        print("No groups found. You must create a new group.")
+                        use_existing = "no"
+                    else:
+                        print("Available groups:")
+                        for idx, g in enumerate(groups, 1):
+                            print(f"{idx}. {g['displayName']} (ID: {g['id']})")
+                        while True:
+                            sel = input("Enter the number of the group to use, or type the group ID directly: ").strip()
+                            if sel.isdigit() and 1 <= int(sel) <= len(groups):
+                                group_id = groups[int(sel)-1]['id']
+                                break
+                            elif any(g['id'] == sel for g in groups):
+                                group_id = sel
+                                break
+                            else:
+                                print("Invalid selection. Try again.")
+                except Exception as e:
+                    print(f"Failed to list groups: {e}")
+                    continue
+            if use_existing not in ("yes", "y"):
+                while True:
+                    group_name = input("Enter Azure AD group name to create for deployment: ").strip()
+                    if not group_name:
+                        print("Group name cannot be empty.")
+                        continue
+                    try:
+                        group_id = create_aad_group(token, group_name)
+                        break
+                    except requests.exceptions.HTTPError as e:
+                        if e.response.status_code == 403:
+                            print("ERROR: 403 Forbidden. Your app registration likely lacks Group.ReadWrite.All (application) permission.\n"\
+                                  "Please grant this permission and admin consent in Azure AD, then try again.")
+                            return
+                        else:
+                            print(f"Failed to create group: {e}")
+                            return
+            # Step 3: Create deployment
+            try:
+                create_deployment_for_recent_update(token, update_id, group_id)
+            except requests.exceptions.HTTPError as e:
+                print(f"Failed to create deployment: {e}")
         else:
             print("Invalid choice. Please try again.")
 
 if __name__ == "__main__":
-    main_menu()
+    agent_experience()
+# This code is a Windows Update Deployment Agent that interacts with the Microsoft Graph API
+# to list expedite quality updates, check the most recent quality update, and create deployments
