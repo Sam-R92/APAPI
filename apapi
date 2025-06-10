@@ -119,6 +119,22 @@ def get_existing_groups(access_token):
     groups = response.json().get('value', [])
     return groups
 
+def list_all_devices(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    url = "https://graph.microsoft.com/v1.0/devices?$select=displayName,deviceId,managementType,operatingSystemVersion"
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    devices = response.json().get('value', [])
+    if not devices:
+        print("No devices found.")
+        return
+    print("Devices:")
+    for device in devices:
+        print(f"Name: {device.get('displayName')}, ID: {device.get('deviceId')}, Management: {device.get('managementType')}, OS Version: {device.get('operatingSystemVersion')}")
+
 def agent_experience():
     print("\nWelcome to the Windows Update Deployment Agent!")
     print("This assistant will guide you through creating an Azure AD group and deploying the latest quality update.")
@@ -126,30 +142,34 @@ def agent_experience():
     token = get_access_token()
     while True:
         print("What would you like to do?")
-        print("1. List expedite quality updates")
-        print("2. Check most recent quality update")
-        print("3. Create a deployment for the most recent quality update")
-        print("4. Exit")
+        print("1. List all devices")
+        print("2. List expedite quality updates")
+        print("3. Check most recent quality update")
+        print("4. Create a deployment for the most recent quality update")
+        print("5. Exit")
         choice = input("Enter your choice: ").strip().lower()
-        if choice in ('4', 'exit', 'quit'):
+        if choice in ('5', 'exit', 'quit'):
             print("Goodbye!")
             break
         elif choice == 'help':
             print("This agent helps you automate Windows Update deployments using Microsoft Graph API.")
             continue
         elif choice == '1':
-            list_expedite_quality_updates(token)
+            list_all_devices(token)
         elif choice == '2':
-            get_recent_quality_update(token)
+            list_expedite_quality_updates(token)
         elif choice == '3':
-            # Step 1: Show the most recent update and ask for confirmation
+            get_recent_quality_update(token)
+        elif choice == '4':
+            # Step 1: Show the most recent expedite update and ask for confirmation
             headers = {
                 'Authorization': f'Bearer {token}',
                 'Content-Type': 'application/json'
             }
             url = (
                 "https://graph.microsoft.com/beta/admin/windows/updates/catalog/entries"
-                "?$expand=microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry/productRevisions"
+                "?$filter=isof('microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry') "
+                "and microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry/isExpeditable eq true"
                 "&$orderby=releaseDateTime desc&$top=1"
             )
             response = requests.get(url, headers=headers)
@@ -157,12 +177,12 @@ def agent_experience():
             data = response.json()
             entries = data.get('value', [])
             if not entries:
-                print("No recent quality update found.")
+                print("No expedite quality update found.")
                 continue
             update = entries[0]
-            print("Most recent quality update:")
+            print("Most recent expedite quality update:")
             print(json.dumps(update, indent=2))
-            confirm = input("Do you want to deploy this update? (yes/no): ").strip().lower()
+            confirm = input("Do you want to deploy this expedite update? (yes/no): ").strip().lower()
             if confirm not in ("yes", "y"):
                 print("Deployment cancelled.")
                 continue
