@@ -26,18 +26,27 @@ def list_expedite_quality_updates(access_token):
         'Authorization': f'Bearer {access_token}',
         'Content-Type': 'application/json'
     }
-    url = ("https://graph.microsoft.com/beta/admin/windows/updates/catalog/entries"
-           "?$filter=isof('microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry') "
-           "and microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry/isExpeditable eq true"
-           "&$orderby=releaseDateTime desc&$top=2")
+    url = "https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdateProfiles"
     response = requests.get(url, headers=headers)
     response.raise_for_status()
-    data = response.json()
-    entries = data.get('value', [])
-    if not entries:
-        print("No expedite quality update catalog entries found.")
+    profiles = response.json().get('value', [])
+    if not profiles:
+        print("No Windows Quality Update Profiles found.")
         return
-    print(json.dumps(entries, indent=2))
+    # Sort by displayName
+    profiles.sort(key=lambda x: x.get('displayName', ''))
+    print(f"{'Display Name':35} | {'Expedited Update Settings':40} | {'Created Date':20}")
+    print("-"*105)
+    for profile in profiles:
+        display_name = profile.get('displayName', '-')[:35]
+        expedited_settings = profile.get('expeditedUpdateSettings', {})
+        if expedited_settings:
+            # Format as JSON string for compact display
+            settings_str = json.dumps(expedited_settings, separators=(',', ':'))
+        else:
+            settings_str = '-'
+        created = profile.get('createdDateTime', '-')
+        print(f"{display_name:35} | {settings_str:40} | {created:20}")
 
 def get_recent_quality_update(access_token):
     headers = {
@@ -135,6 +144,601 @@ def list_all_devices(access_token):
     for device in devices:
         print(f"Name: {device.get('displayName')}, ID: {device.get('deviceId')}, Management: {device.get('managementType')}, OS Version: {device.get('operatingSystemVersion')}")
 
+def list_feature_update_options(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    url = ("https://graph.microsoft.com/beta/admin/windows/updates/catalog/entries"
+           "?$filter=isof('microsoft.graph.windowsUpdates.featureUpdateCatalogEntry')")
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    data = response.json()
+    entries = data.get('value', [])
+    if not entries:
+        print("No feature update catalog entries found.")
+        return
+    print("Feature Update Options:")
+    for entry in entries:
+        print(json.dumps(entry, indent=2))
+
+def deploy_feature_update(access_token):
+    # Step 1: List all available feature updates
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    url = ("https://graph.microsoft.com/beta/admin/windows/updates/catalog/entries"
+           "?$filter=isof('microsoft.graph.windowsUpdates.featureUpdateCatalogEntry')")
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    data = response.json()
+    entries = data.get('value', [])
+    if not entries:
+        print("No feature update catalog entries found.")
+        return
+    print("Available Feature Updates:")
+    for idx, entry in enumerate(entries, 1):
+        print(f"{idx}. Title: {entry.get('title', 'N/A')} | ID: {entry.get('id')}")
+    # Step 2: Ask user to choose a version
+    while True:
+        sel = input("Enter the number of the feature update to deploy: ").strip()
+        if sel.isdigit() and 1 <= int(sel) <= len(entries):
+            feature_update = entries[int(sel)-1]
+            break
+        else:
+            print("Invalid selection. Try again.")
+    update_id = feature_update.get('id')
+    # Step 3: Ask for Azure AD group
+    use_existing = input("Do you want to use an existing Azure AD group? (yes/no): ").strip().lower()
+    if use_existing in ("yes", "y"):
+        try:
+            groups = get_existing_groups(access_token)
+            if not groups:
+                print("No groups found. You must create a new group.")
+                use_existing = "no"
+            else:
+                print("Available groups:")
+                for idx, g in enumerate(groups, 1):
+                    print(f"{idx}. {g['displayName']} (ID: {g['id']})")
+                while True:
+                    sel = input("Enter the number of the group to use, or type the group ID directly: ").strip()
+                    if sel.isdigit() and 1 <= int(sel) <= len(groups):
+                        group_id = groups[int(sel)-1]['id']
+                        break
+                    elif any(g['id'] == sel for g in groups):
+                        group_id = sel
+                        break
+                    else:
+                        print("Invalid selection. Try again.")
+        except Exception as e:
+            print(f"Failed to list groups: {e}")
+            return
+    if use_existing not in ("yes", "y"):
+        while True:
+            group_name = input("Enter Azure AD group name to create for deployment: ").strip()
+            if not group_name:
+                print("Group name cannot be empty.")
+                continue
+            try:
+                group_id = create_aad_group(access_token, group_name)
+                break
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 403:
+                    print("ERROR: 403 Forbidden. Your app registration likely lacks Group.ReadWrite.All (application) permission.\n"\
+                          "Please grant this permission and admin consent in Azure AD, then try again.")
+                    return
+                else:
+                    print(f"Failed to create group: {e}")
+                    return
+    # Step 4: Deploy the selected feature update
+    payload = {
+        "content": {
+            "catalogEntry": {
+                "@odata.type": "#microsoft.graph.windowsUpdates.featureUpdateCatalogEntry",
+                "id": update_id
+            }
+        },
+        "audience": {
+            "azureADGroupIds": [group_id]
+        },
+        "settings": {
+            "@odata.type": "#microsoft.graph.windowsUpdates.deploymentSettings",
+            "schedule": {
+                "startDateTime": "2025-06-10T05:00:00Z",
+                "gradualRollout": {
+                    "@odata.type": "#microsoft.graph.windowsUpdates.rateDrivenRolloutSettings",
+                    "durationBetweenOffers": "P3D",
+                    "devicesPerOffer": 100
+                }
+            },
+            "monitoring": {
+                "monitoringRules": [
+                    {
+                        "signal": "rollback",
+                        "threshold": 5,
+                        "action": "pauseDeployment"
+                    }
+                ]
+            }
+        }
+    }
+    deploy_url = "https://graph.microsoft.com/beta/admin/windows/updates/deployments"
+    resp = requests.post(deploy_url, headers=headers, data=json.dumps(payload))
+    print("Create feature update deployment response:", resp.text)
+    resp.raise_for_status()
+    print("Feature update deployment created successfully.")
+
+def list_feature_update_policies(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    url = "https://graph.microsoft.com/beta/deviceManagement/windowsFeatureUpdateProfiles"
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    profiles = response.json().get('value', [])
+    # Filter for displayName containing 'Autopatch'
+    autopatch_profiles = [p for p in profiles if 'Autopatch' in p.get('displayName', '')]
+    if not autopatch_profiles:
+        print("No Windows Feature Update Profiles with 'Autopatch' in the name found.")
+        return
+    # Sort by displayName
+    autopatch_profiles.sort(key=lambda x: x.get('displayName', ''))
+    # Print as table with createdDateTime
+    print(f"{'Display Name':35} | {'Feature Update Version':20} | {'Created Date':20}")
+    print("-"*85)
+    for profile in autopatch_profiles:
+        display_name = profile.get('displayName', '-')[:35]
+        version = profile.get('featureUpdateVersion', '-')
+        created = profile.get('createdDateTime', '-')
+        print(f"{display_name:35} | {version:20} | {created:20}")
+
+def list_driver_update_policies(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    url = "https://graph.microsoft.com/beta/deviceManagement/windowsDriverUpdateProfiles"
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    profiles = response.json().get('value', [])
+    # Filter for displayName containing 'Autopatch'
+    autopatch_profiles = [p for p in profiles if 'Autopatch' in p.get('displayName', '')]
+    if not autopatch_profiles:
+        print("No Windows Driver Update Profiles with 'Autopatch' in the name found.")
+        return
+    # Sort by displayName
+    autopatch_profiles.sort(key=lambda x: x.get('displayName', ''))
+    # Print as table with createdDateTime and approvalType
+    print(f"{'Display Name':35} | {'Approval Type':20} | {'Created Date':20}")
+    print("-"*85)
+    for profile in autopatch_profiles:
+        display_name = profile.get('displayName', '-')[:35]
+        approval_type = profile.get('approvalType', '-')
+        created = profile.get('createdDateTime', '-')
+        print(f"{display_name:35} | {approval_type:20} | {created:20}")
+
+def list_hotpatch_policies(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    url = "https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdatePolicies"
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    policies = response.json().get('value', [])
+    if not policies:
+        print("No Windows Quality Update Policies found.")
+        return
+    # Sort by displayName
+    policies.sort(key=lambda x: x.get('displayName', ''))
+    # Print as table with createdDateTime and hotpatchEnabled
+    print(f"{'Display Name':35} | {'Hotpatch Enabled':15} | {'Created Date':20}")
+    print("-"*80)
+    for policy in policies:
+        display_name = policy.get('displayName', '-')[:35]
+        hotpatch_enabled = str(policy.get('hotpatchEnabled', '-'))
+        created = policy.get('createdDateTime', '-')
+        print(f"{display_name:35} | {hotpatch_enabled:15} | {created:20}")
+
+def create_expedite_quality_update(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    # Step 1: List up to 4 available expedite quality updates
+    url = ("https://graph.microsoft.com/beta/admin/windows/updates/catalog/entries"
+           "?$filter=isof('microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry') "
+           "and microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry/isExpeditable eq true"
+           "&$orderby=releaseDateTime desc&$top=4")
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    updates = response.json().get('value', [])
+    if not updates:
+        print("No expedite quality updates available.")
+        return
+    print("Available Expedite Quality Updates:")
+    for idx, update in enumerate(updates, 1):
+        display_name = update.get('displayName', '-')
+        release_date = update.get('releaseDateTime', '-')
+        print(f"{idx}. Name: {display_name[:40]} | Release Date: {release_date}")
+    print("5. Cancel")
+    # Step 2: Ask user to select one or cancel
+    while True:
+        sel = input("Enter the number of the expedite update to use (or 5 to cancel): ").strip()
+        if sel == '5':
+            print("Operation cancelled.")
+            return
+        if sel.isdigit() and 1 <= int(sel) <= len(updates):
+            selected_update = updates[int(sel)-1]
+            break
+        else:
+            print("Invalid selection. Try again.")
+    update_id = selected_update.get('id')
+    # Step 3: Ask for profile name
+    profile_name = input("Enter a name for the new Expedite Quality Update profile: ").strip()
+    if not profile_name:
+        print("Profile name cannot be empty.")
+        return
+    # Step 4: Create the profile
+    payload = {
+        "displayName": profile_name,
+        "expeditedUpdateSettings": {
+            "qualityUpdateRelease": selected_update.get('releaseDateTime'),
+            "daysUntilForcedReboot": 1
+        }
+    }
+    create_url = "https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdateProfiles"
+    resp = requests.post(create_url, headers=headers, data=json.dumps(payload))
+    if resp.status_code == 201:
+        print(f"Expedite Quality Update profile '{profile_name}' created successfully.")
+    else:
+        print(f"Failed to create profile: {resp.status_code} {resp.text}")
+
+def deploy_expedite_quality_update(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    # Step 1: List available expedite quality update profiles
+    url = "https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdateProfiles"
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    profiles = response.json().get('value', [])
+    if not profiles:
+        print("No Expedite Quality Update Profiles found. Please create one first.")
+        return
+    print("Available Expedite Quality Update Profiles:")
+    print(f"{'No.':3} {'Display Name':40} | {'Expedite Update Settings':40} | {'Created':20}")
+    print("-"*110)
+    for idx, profile in enumerate(profiles, 1):
+        display_name = profile.get('displayName', '-')[:40]
+        created = profile.get('createdDateTime', '-')
+        expedited_settings = profile.get('expeditedUpdateSettings', {})
+        if expedited_settings:
+            settings_str = json.dumps(expedited_settings, separators=(',', ':'))
+        else:
+            settings_str = '-'
+        print(f"{idx:3} {display_name:40} | {settings_str:40} | {created:20}")
+    cancel_option = len(profiles) + 1
+    print(f"{cancel_option}. Cancel")
+    # Step 2: Ask user to select a profile or cancel
+    while True:
+        sel = input(f"Enter the number of the Expedite Quality Update profile to deploy (or {cancel_option} to cancel): ").strip()
+        if sel == str(cancel_option):
+            print("Operation cancelled.")
+            return
+        if sel.isdigit() and 1 <= int(sel) <= len(profiles):
+            selected_profile = profiles[int(sel)-1]
+            break
+        else:
+            print("Invalid selection. Try again.")
+    profile_id = selected_profile.get('id')
+    # Step 3: Ask for group deployment method
+    use_existing = input("Do you want to use an existing Azure AD group? (yes/no): ").strip().lower()
+    if use_existing in ("yes", "y"):
+        groups = get_existing_groups(access_token)
+        if not groups:
+            print("No groups found. You must create a new group.")
+            use_existing = "no"
+        else:
+            print("Available groups:")
+            for idx, g in enumerate(groups, 1):
+                print(f"{idx}. {g['displayName']} (ID: {g['id']})")
+            while True:
+                sel = input("Enter the number of the group to use, or type the group ID directly: ").strip()
+                if sel.isdigit() and 1 <= int(sel) <= len(groups):
+                    group_id = groups[int(sel)-1]['id']
+                    break
+                elif any(g['id'] == sel for g in groups):
+                    group_id = sel
+                    break
+                else:
+                    print("Invalid selection. Try again.")
+    if use_existing not in ("yes", "y"):
+        while True:
+            group_name = input("Enter Azure AD group name to create for deployment: ").strip()
+            if not group_name:
+                print("Group name cannot be empty.")
+                continue
+            try:
+                group_id = create_aad_group(access_token, group_name)
+                break
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 403:
+                    print("ERROR: 403 Forbidden. Your app registration likely lacks Group.ReadWrite.All (application) permission.\n"
+                          "Please grant this permission and admin consent in Azure AD, then try again.")
+                    return
+                else:
+                    print(f"Failed to create group: {e}")
+                    return
+    # Step 4: Assign the policy to the group (create assignment)
+    assignment_url = f"https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdateProfiles/{profile_id}/assign"
+    payload = {
+        "assignments": [
+            {
+                "target": {
+                    "@odata.type": "#microsoft.graph.groupAssignmentTarget",
+                    "groupId": group_id
+                }
+            }
+        ]
+    }
+    resp = requests.post(assignment_url, headers=headers, data=json.dumps(payload))
+    if resp.status_code in (200, 204):
+        print(f"Expedite Quality Update profile assigned to group successfully.")
+    else:
+        print(f"Failed to assign profile: {resp.status_code} {resp.text}")
+
+def create_hotpatch_policy(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    print("Create a new Hotpatch Policy:")
+    policy_name = input("Enter a name for the new Hotpatch policy: ").strip()
+    if not policy_name:
+        print("Policy name cannot be empty.")
+        return
+    while True:
+        hotpatch_enabled = input("Enable hotpatching? (yes/no): ").strip().lower()
+        if hotpatch_enabled in ("yes", "y"):
+            hotpatch_enabled = True
+            break
+        elif hotpatch_enabled in ("no", "n"):
+            hotpatch_enabled = False
+            break
+        else:
+            print("Please enter 'yes' or 'no'.")
+    payload = {
+        "displayName": policy_name,
+        "hotpatchEnabled": hotpatch_enabled
+    }
+    url = "https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdatePolicies"
+    response = requests.post(url, headers=headers, data=json.dumps(payload))
+    if response.status_code == 201:
+        print(f"Hotpatch policy '{policy_name}' created successfully.")
+    else:
+        print(f"Failed to create hotpatch policy: {response.status_code} {response.text}")
+
+def deploy_hotpatch_policy(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    # Step 1: List available hotpatch policies
+    url = "https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdatePolicies"
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    policies = response.json().get('value', [])
+    if not policies:
+        print("No Hotpatch Policies found. Please create one first.")
+        return
+    print("Available Hotpatch Policies:")
+    print(f"{'No.':3} {'Display Name':40} | {'Hotpatch Enabled':15} | {'Created':20}")
+    print("-"*85)
+    for idx, policy in enumerate(policies, 1):
+        display_name = policy.get('displayName', '-')[:40]
+        hotpatch_enabled = str(policy.get('hotpatchEnabled', '-'))
+        created = policy.get('createdDateTime', '-')
+        print(f"{idx:3} {display_name:40} | {hotpatch_enabled:15} | {created:20}")
+    cancel_option = len(policies) + 1
+    print(f"{cancel_option}. Cancel")
+    # Step 2: Ask user to select a policy or cancel
+    while True:
+        sel = input(f"Enter the number of the Hotpatch policy to deploy (or {cancel_option} to cancel): ").strip()
+        if sel == str(cancel_option):
+            print("Operation cancelled.")
+            return
+        if sel.isdigit() and 1 <= int(sel) <= len(policies):
+            selected_policy = policies[int(sel)-1]
+            break
+        else:
+            print("Invalid selection. Try again.")
+    policy_id = selected_policy.get('id')
+    # Step 3: Ask for group deployment method
+    use_existing = input("Do you want to use an existing Azure AD group? (yes/no): ").strip().lower()
+    if use_existing in ("yes", "y"):
+        groups = get_existing_groups(access_token)
+        if not groups:
+            print("No groups found. You must create a new group.")
+            use_existing = "no"
+        else:
+            print("Available groups:")
+            for idx, g in enumerate(groups, 1):
+                print(f"{idx}. {g['displayName']} (ID: {g['id']})")
+            while True:
+                sel = input("Enter the number of the group to use, or type the group ID directly: ").strip()
+                if sel.isdigit() and 1 <= int(sel) <= len(groups):
+                    group_id = groups[int(sel)-1]['id']
+                    break
+                elif any(g['id'] == sel for g in groups):
+                    group_id = sel
+                    break
+                else:
+                    print("Invalid selection. Try again.")
+    if use_existing not in ("yes", "y"):
+        while True:
+            group_name = input("Enter Azure AD group name to create for deployment: ").strip()
+            if not group_name:
+                print("Group name cannot be empty.")
+                continue
+            try:
+                group_id = create_aad_group(access_token, group_name)
+                break
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 403:
+                    print("ERROR: 403 Forbidden. Your app registration likely lacks Group.ReadWrite.All (application) permission.\n"
+                          "Please grant this permission and admin consent in Azure AD, then try again.")
+                    return
+                else:
+                    print(f"Failed to create group: {e}")
+                    return
+    # Step 4: Assign the policy to the group (create assignment)
+    assignment_url = f"https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdatePolicies/{policy_id}/assign"
+    payload = {
+        "assignments": [
+            {
+                "target": {
+                    "@odata.type": "#microsoft.graph.groupAssignmentTarget",
+                    "groupId": group_id
+                }
+            }
+        ]
+    }
+    resp = requests.post(assignment_url, headers=headers, data=json.dumps(payload))
+    if resp.status_code in (200, 204):
+        print(f"Hotpatch policy assigned to group successfully.")
+    else:
+        print(f"Failed to assign hotpatch policy: {resp.status_code} {resp.text}")
+
+def modify_expedite_policy(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    # Step 1: List available expedite quality update profiles
+    url = "https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdateProfiles"
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    profiles = response.json().get('value', [])
+    if not profiles:
+        print("No Expedite Quality Update Profiles found.")
+        return
+    print("Available Expedite Quality Update Profiles:")
+    print(f"{'No.':3} {'Display Name':40} | {'daysUntilForcedReboot':22} | {'Created':20}")
+    print("-"*90)
+    for idx, profile in enumerate(profiles, 1):
+        display_name = profile.get('displayName', '-')[:40]
+        expedited_settings = profile.get('expeditedUpdateSettings', {})
+        days_until_reboot = expedited_settings.get('daysUntilForcedReboot', '-')
+        created = profile.get('createdDateTime', '-')
+        print(f"{idx:3} {display_name:40} | {str(days_until_reboot):22} | {created:20}")
+    cancel_option = len(profiles) + 1
+    print(f"{cancel_option}. Cancel")
+    # Step 2: Ask user to select a profile or cancel
+    while True:
+        sel = input(f"Enter the number of the Expedite Quality Update profile to modify (or {cancel_option} to cancel): ").strip()
+        if sel == str(cancel_option):
+            print("Operation cancelled.")
+            return
+        if sel.isdigit() and 1 <= int(sel) <= len(profiles):
+            selected_profile = profiles[int(sel)-1]
+            break
+        else:
+            print("Invalid selection. Try again or select Cancel.")
+    profile_id = selected_profile.get('id')
+    expedited_settings = selected_profile.get('expeditedUpdateSettings', {})
+    current_days = expedited_settings.get('daysUntilForcedReboot', '-')
+    print(f"Current daysUntilForcedReboot: {current_days}")
+    # Step 3: Ask for new value (1-3 days)
+    while True:
+        new_days = input("Enter new value for daysUntilForcedReboot (1-3, or type 'cancel' to abort): ").strip()
+        if new_days.lower() == 'cancel':
+            print("Operation cancelled.")
+            return
+        if new_days.isdigit() and 1 <= int(new_days) <= 3:
+            new_days = int(new_days)
+            break
+        else:
+            print("Please enter a number between 1 and 3, or type 'cancel' to abort.")
+    # Step 4: Patch the profile
+    patch_url = f"https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdateProfiles/{profile_id}"
+    patch_payload = {
+        "expeditedUpdateSettings": {
+            **expedited_settings,
+            "daysUntilForcedReboot": new_days
+        }
+    }
+    patch_resp = requests.patch(patch_url, headers=headers, data=json.dumps(patch_payload))
+    if patch_resp.status_code in (200, 204):
+        print("Expedite Quality Update profile updated successfully.")
+    else:
+        print(f"Failed to update profile: {patch_resp.status_code} {patch_resp.text}")
+
+def modify_hotpatch_policy(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    # Step 1: List available hotpatch policies
+    url = "https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdatePolicies"
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    policies = response.json().get('value', [])
+    if not policies:
+        print("No Hotpatch Policies found.")
+        return
+    print("Available Hotpatch Policies:")
+    print(f"{'No.':3} {'Display Name':40} | {'Hotpatch Enabled':15} | {'Created':20}")
+    print("-"*85)
+    for idx, policy in enumerate(policies, 1):
+        display_name = policy.get('displayName', '-')[:40]
+        hotpatch_enabled = str(policy.get('hotpatchEnabled', '-'))
+        created = policy.get('createdDateTime', '-')
+        print(f"{idx:3} {display_name:40} | {hotpatch_enabled:15} | {created:20}")
+    cancel_option = len(policies) + 1
+    print(f"{cancel_option}. Cancel")
+    # Step 2: Ask user to select a policy or cancel
+    while True:
+        sel = input(f"Enter the number of the Hotpatch policy to modify (or {cancel_option} to cancel): ").strip()
+        if sel == str(cancel_option):
+            print("Operation cancelled.")
+            return
+        if sel.isdigit() and 1 <= int(sel) <= len(policies):
+            selected_policy = policies[int(sel)-1]
+            break
+        else:
+            print("Invalid selection. Try again or select Cancel.")
+    policy_id = selected_policy.get('id')
+    current_enabled = selected_policy.get('hotpatchEnabled', '-')
+    print(f"Current Hotpatch Enabled: {current_enabled}")
+    # Step 3: Ask for new value
+    while True:
+        new_enabled = input("Set Hotpatch Enabled to True or False (or type 'cancel' to abort): ").strip().lower()
+        if new_enabled == 'cancel':
+            print("Operation cancelled.")
+            return
+        if new_enabled in ('true', 't', 'yes', 'y'):
+            new_enabled_bool = True
+            break
+        elif new_enabled in ('false', 'f', 'no', 'n'):
+            new_enabled_bool = False
+            break
+        else:
+            print("Please enter True or False, or type 'cancel' to abort.")
+    # Step 4: Patch the policy
+    patch_url = f"https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdatePolicies/{policy_id}"
+    patch_payload = {
+        "hotpatchEnabled": new_enabled_bool
+    }
+    patch_resp = requests.patch(patch_url, headers=headers, data=json.dumps(patch_payload))
+    if patch_resp.status_code in (200, 204):
+        print("Hotpatch policy updated successfully.")
+    else:
+        print(f"Failed to update hotpatch policy: {patch_resp.status_code} {patch_resp.text}")
+
 def agent_experience():
     print("\nWelcome to the Windows Update Deployment Agent!")
     print("This assistant will guide you through creating an Azure AD group and deploying the latest quality update.")
@@ -143,12 +747,19 @@ def agent_experience():
     while True:
         print("What would you like to do?")
         print("1. List all devices")
-        print("2. List expedite quality updates")
-        print("3. Check most recent quality update")
-        print("4. Create a deployment for the most recent quality update")
-        print("5. Exit")
+        print("2. List feature update policies")
+        print("3. List driver update policies")
+        print("4. List Hotpatch policies")
+        print("5. List expedite quality update policies")
+        print("6. Create expedite quality update policy")
+        print("7. Deploy expedite quality update policy")
+        print("8. Create Hotpatch policy")
+        print("9. Deploy Hotpatch policy")
+        print("10. Modify expedite quality update policy")
+        print("11. Modify Hotpatch policy")
+        print("12. Exit")
         choice = input("Enter your choice: ").strip().lower()
-        if choice in ('5', 'exit', 'quit'):
+        if choice in ('12', 'exit', 'quit'):
             print("Goodbye!")
             break
         elif choice == 'help':
@@ -157,83 +768,25 @@ def agent_experience():
         elif choice == '1':
             list_all_devices(token)
         elif choice == '2':
-            list_expedite_quality_updates(token)
+            list_feature_update_policies(token)
         elif choice == '3':
-            get_recent_quality_update(token)
+            list_driver_update_policies(token)
         elif choice == '4':
-            # Step 1: Show the most recent expedite update and ask for confirmation
-            headers = {
-                'Authorization': f'Bearer {token}',
-                'Content-Type': 'application/json'
-            }
-            url = (
-                "https://graph.microsoft.com/beta/admin/windows/updates/catalog/entries"
-                "?$filter=isof('microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry') "
-                "and microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry/isExpeditable eq true"
-                "&$orderby=releaseDateTime desc&$top=1"
-            )
-            response = requests.get(url, headers=headers)
-            response.raise_for_status()
-            data = response.json()
-            entries = data.get('value', [])
-            if not entries:
-                print("No expedite quality update found.")
-                continue
-            update = entries[0]
-            print("Most recent expedite quality update:")
-            print(json.dumps(update, indent=2))
-            confirm = input("Do you want to deploy this expedite update? (yes/no): ").strip().lower()
-            if confirm not in ("yes", "y"):
-                print("Deployment cancelled.")
-                continue
-            update_id = update.get('id')
-            # Step 2: Choose existing group or create new
-            use_existing = input("Do you want to use an existing Azure AD group? (yes/no): ").strip().lower()
-            if use_existing in ("yes", "y"):
-                try:
-                    groups = get_existing_groups(token)
-                    if not groups:
-                        print("No groups found. You must create a new group.")
-                        use_existing = "no"
-                    else:
-                        print("Available groups:")
-                        for idx, g in enumerate(groups, 1):
-                            print(f"{idx}. {g['displayName']} (ID: {g['id']})")
-                        while True:
-                            sel = input("Enter the number of the group to use, or type the group ID directly: ").strip()
-                            if sel.isdigit() and 1 <= int(sel) <= len(groups):
-                                group_id = groups[int(sel)-1]['id']
-                                break
-                            elif any(g['id'] == sel for g in groups):
-                                group_id = sel
-                                break
-                            else:
-                                print("Invalid selection. Try again.")
-                except Exception as e:
-                    print(f"Failed to list groups: {e}")
-                    continue
-            if use_existing not in ("yes", "y"):
-                while True:
-                    group_name = input("Enter Azure AD group name to create for deployment: ").strip()
-                    if not group_name:
-                        print("Group name cannot be empty.")
-                        continue
-                    try:
-                        group_id = create_aad_group(token, group_name)
-                        break
-                    except requests.exceptions.HTTPError as e:
-                        if e.response.status_code == 403:
-                            print("ERROR: 403 Forbidden. Your app registration likely lacks Group.ReadWrite.All (application) permission.\n"\
-                                  "Please grant this permission and admin consent in Azure AD, then try again.")
-                            return
-                        else:
-                            print(f"Failed to create group: {e}")
-                            return
-            # Step 3: Create deployment
-            try:
-                create_deployment_for_recent_update(token, update_id, group_id)
-            except requests.exceptions.HTTPError as e:
-                print(f"Failed to create deployment: {e}")
+            list_hotpatch_policies(token)
+        elif choice == '5':
+            list_expedite_quality_updates(token)
+        elif choice == '6':
+            create_expedite_quality_update(token)
+        elif choice == '7':
+            deploy_expedite_quality_update(token)
+        elif choice == '8':
+            create_hotpatch_policy(token)
+        elif choice == '9':
+            deploy_hotpatch_policy(token)
+        elif choice == '10':
+            modify_expedite_policy(token)
+        elif choice == '11':
+            modify_hotpatch_policy(token)
         else:
             print("Invalid choice. Please try again.")
 
