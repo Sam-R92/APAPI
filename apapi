@@ -468,49 +468,29 @@ def deploy_expedite_quality_update(access_token):
                 break
             except requests.exceptions.HTTPError as e:
                 if e.response.status_code == 403:
-                    print("ERROR: 403 Forbidden. Your app registration likely lacks Group.ReadWrite.All (application) permission.\n"\
+                    print("ERROR: 403 Forbidden. Your app registration likely lacks Group.ReadWrite.All (application) permission.\n"
                           "Please grant this permission and admin consent in Azure AD, then try again.")
                     return
                 else:
                     print(f"Failed to create group: {e}")
                     return
-    # Step 4: Deploy the selected expedite update
+    # Step 4: Assign the profile to the group
+    assign_url = f"https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdateProfiles/{profile_id}/assignments"
     payload = {
-        "content": {
-            "catalogEntry": {
-                "@odata.type": "#microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry",
-                "id": profile_id
-            }
-        },
-        "audience": {
-            "azureADGroupIds": [group_id]
-        },
-        "settings": {
-            "@odata.type": "#microsoft.graph.windowsUpdates.deploymentSettings",
-            "schedule": {
-                "startDateTime": "2025-06-10T05:00:00Z",
-                "gradualRollout": {
-                    "@odata.type": "#microsoft.graph.windowsUpdates.rateDrivenRolloutSettings",
-                    "durationBetweenOffers": "P3D",
-                    "devicesPerOffer": 100
+        "assignments": [
+            {
+                "target": {
+                    "@odata.type": "#microsoft.graph.groupAssignmentTarget",
+                    "groupId": group_id
                 }
-            },
-            "monitoring": {
-                "monitoringRules": [
-                    {
-                        "signal": "rollback",
-                        "threshold": 5,
-                        "action": "pauseDeployment"
-                    }
-                ]
             }
-        }
+        ]
     }
-    deploy_url = "https://graph.microsoft.com/beta/admin/windows/updates/deployments"
-    resp = requests.post(deploy_url, headers=headers, data=json.dumps(payload))
-    print("Create expedite update deployment response:", resp.text)
-    resp.raise_for_status()
-    print("Expedite update deployment created successfully.")
+    resp = requests.post(assign_url, headers=headers, data=json.dumps(payload))
+    if resp.status_code in (200, 201, 204):
+        print("Expedite quality update profile assigned to group successfully.")
+    else:
+        print(f"Failed to assign profile: {resp.status_code} {resp.text}")
 
 def list_configuration_policies(access_token):
     headers = {
@@ -662,6 +642,204 @@ def removal(access_token):
         else:
             print(f"Failed to delete policy: {del_resp.status_code} {del_resp.text}")
 
+def create_hotpatch_policy(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    print("\nCreate Hotpatch Policy:")
+    policy_name = input("Enter a name for the new Hotpatch Policy: ").strip()
+    if not policy_name:
+        print("Policy name cannot be empty.")
+        return
+    enable_hotpatch = input("Enable hotpatch? (yes/no): ").strip().lower()
+    if enable_hotpatch not in ("yes", "y", "no", "n"):
+        print("Invalid input. Please enter 'yes' or 'no'.")
+        return
+    hotpatch_enabled = enable_hotpatch in ("yes", "y")
+    payload = {
+        "displayName": policy_name,
+        "hotpatchEnabled": hotpatch_enabled
+    }
+    url = "https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdatePolicies"
+    response = requests.post(url, headers=headers, data=json.dumps(payload))
+    if response.status_code == 201:
+        print(f"Hotpatch Policy '{policy_name}' created successfully.")
+    else:
+        print(f"Failed to create Hotpatch Policy: {response.status_code} {response.text}")
+
+def deploy_hotpatch_policy(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    # List all hotpatch policies
+    url = "https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdatePolicies"
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    policies = response.json().get('value', [])
+    if not policies:
+        print("No Hotpatch Policies found.")
+        return
+    print("Available Hotpatch Policies:")
+    for idx, policy in enumerate(policies, 1):
+        print(f"{idx}. {policy.get('displayName', '-')[:40]} (ID: {policy.get('id')})")
+    print(f"{len(policies)+1}. Cancel")
+    while True:
+        sel = input(f"Select a policy to assign to a group (1-{len(policies)+1}): ").strip()
+        if sel == str(len(policies)+1):
+            print("Operation cancelled.")
+            return
+        if sel.isdigit() and 1 <= int(sel) <= len(policies):
+            selected_policy = policies[int(sel)-1]
+            break
+        else:
+            print("Invalid selection. Try again.")
+    policy_id = selected_policy.get('id')
+    use_existing = input("Do you want to use an existing Azure AD group? (yes/no): ").strip().lower()
+    if use_existing in ("yes", "y"):
+        groups = get_existing_groups(access_token)
+        if not groups:
+            print("No groups found. You must create a new group.")
+            use_existing = "no"
+        else:
+            print("Available groups:")
+            for idx, g in enumerate(groups, 1):
+                print(f"{idx}. {g['displayName']} (ID: {g['id']})")
+            while True:
+                sel = input("Enter the number of the group to use, or type the group ID directly: ").strip()
+                if sel.isdigit() and 1 <= int(sel) <= len(groups):
+                    group_id = groups[int(sel)-1]['id']
+                    break
+                elif any(g['id'] == sel for g in groups):
+                    group_id = sel
+                    break
+                else:
+                    print("Invalid selection. Try again.")
+    if use_existing not in ("yes", "y"):
+        while True:
+            group_name = input("Enter Azure AD group name to create for deployment: ").strip()
+            if not group_name:
+                print("Group name cannot be empty.")
+                continue
+            try:
+                group_id = create_aad_group(access_token, group_name)
+                break
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 403:
+                    print("ERROR: 403 Forbidden. Your app registration likely lacks Group.ReadWrite.All (application) permission.\n"
+                          "Please grant this permission and admin consent in Azure AD, then try again.")
+                    return
+                else:
+                    print(f"Failed to create group: {e}")
+                    return
+    # Assign the hotpatch policy to the group
+    assign_url = f"https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdatePolicies/{policy_id}/assignments"
+    payload = {
+        "assignments": [
+            {
+                "target": {
+                    "@odata.type": "#microsoft.graph.groupAssignmentTarget",
+                    "groupId": group_id
+                }
+            }
+        ]
+    }
+    resp = requests.post(assign_url, headers=headers, data=json.dumps(payload))
+    if resp.status_code in (200, 201, 204):
+        print("Hotpatch policy assigned to group successfully.")
+    else:
+        print(f"Failed to assign hotpatch policy: {resp.status_code} {resp.text}")
+
+def modify_expedite_policy(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    url = "https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdateProfiles"
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    profiles = response.json().get('value', [])
+    if not profiles:
+        print("No Expedite Quality Update Profiles found.")
+        return
+    print("Available Expedite Quality Update Profiles:")
+    for idx, profile in enumerate(profiles, 1):
+        print(f"{idx}. {profile.get('displayName', '-')[:40]} (ID: {profile.get('id')})")
+    print(f"{len(profiles)+1}. Cancel")
+    while True:
+        sel = input(f"Select a profile to modify (1-{len(profiles)+1}): ").strip()
+        if sel == str(len(profiles)+1):
+            print("Operation cancelled.")
+            return
+        if sel.isdigit() and 1 <= int(sel) <= len(profiles):
+            selected_profile = profiles[int(sel)-1]
+            break
+        else:
+            print("Invalid selection. Try again.")
+    profile_id = selected_profile.get('id')
+    print(f"Selected: {selected_profile.get('displayName', '-')}")
+    print("Current expeditedUpdateSettings:")
+    print(json.dumps(selected_profile.get('expeditedUpdateSettings', {}), indent=2))
+    new_days = input("Enter new 'daysUntilForcedReboot' (leave blank to keep current): ").strip()
+    expedited_settings = selected_profile.get('expeditedUpdateSettings', {})
+    if new_days:
+        try:
+            expedited_settings['daysUntilForcedReboot'] = int(new_days)
+        except ValueError:
+            print("Invalid number. Keeping current value.")
+    patch_url = f"https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdateProfiles/{profile_id}"
+    payload = {"expeditedUpdateSettings": expedited_settings}
+    patch_resp = requests.patch(patch_url, headers=headers, data=json.dumps(payload))
+    if patch_resp.status_code in (200, 204):
+        print("Profile updated successfully.")
+    else:
+        print(f"Failed to update profile: {patch_resp.status_code} {patch_resp.text}")
+
+def modify_hotpatch_policy(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    url = "https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdatePolicies"
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    policies = response.json().get('value', [])
+    if not policies:
+        print("No Hotpatch Policies found.")
+        return
+    print("Available Hotpatch Policies:")
+    for idx, policy in enumerate(policies, 1):
+        print(f"{idx}. {policy.get('displayName', '-')[:40]} (ID: {policy.get('id')})")
+    print(f"{len(policies)+1}. Cancel")
+    while True:
+        sel = input(f"Select a policy to modify (1-{len(policies)+1}): ").strip()
+        if sel == str(len(policies)+1):
+            print("Operation cancelled.")
+            return
+        if sel.isdigit() and 1 <= int(sel) <= len(policies):
+            selected_policy = policies[int(sel)-1]
+            break
+        else:
+            print("Invalid selection. Try again.")
+    policy_id = selected_policy.get('id')
+    print(f"Selected: {selected_policy.get('displayName', '-')}")
+    print("Current hotpatchEnabled:", selected_policy.get('hotpatchEnabled', '-'))
+    new_enabled = input("Enable hotpatch? (yes/no, leave blank to keep current): ").strip().lower()
+    if new_enabled in ("yes", "y"):
+        hotpatch_enabled = True
+    elif new_enabled in ("no", "n"):
+        hotpatch_enabled = False
+    else:
+        hotpatch_enabled = selected_policy.get('hotpatchEnabled', False)
+    patch_url = f"https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdatePolicies/{policy_id}"
+    payload = {"hotpatchEnabled": hotpatch_enabled}
+    patch_resp = requests.patch(patch_url, headers=headers, data=json.dumps(payload))
+    if patch_resp.status_code in (200, 204):
+        print("Hotpatch policy updated successfully.")
+    else:
+        print(f"Failed to update hotpatch policy: {patch_resp.status_code} {patch_resp.text}")
+
 def main():
     print("\nWelcome to the Windows Update Deployment Agent!")
     access_token = get_access_token()
@@ -697,13 +875,13 @@ def main():
         elif choice == '7':
             deploy_expedite_quality_update(access_token)
         elif choice == '8':
-            print("(Not implemented: create_hotpatch_policy)")
+            create_hotpatch_policy(access_token)
         elif choice == '9':
-            print("(Not implemented: deploy_hotpatch_policy)")
+            deploy_hotpatch_policy(access_token)
         elif choice == '10':
-            print("(Not implemented: modify_expedite_policy)")
+            modify_expedite_policy(access_token)
         elif choice == '11':
-            print("(Not implemented: modify_hotpatch_policy)")
+            modify_hotpatch_policy(access_token)
         elif choice == '12':
             removal(access_token)
         elif choice == '13':
