@@ -673,7 +673,6 @@ def deploy_hotpatch_policy(access_token):
         'Authorization': f'Bearer {access_token}',
         'Content-Type': 'application/json'
     }
-    # List all hotpatch policies
     url = "https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdatePolicies"
     response = requests.get(url, headers=headers)
     response.raise_for_status()
@@ -733,17 +732,13 @@ def deploy_hotpatch_policy(access_token):
                 else:
                     print(f"Failed to create group: {e}")
                     return
-    # Assign the hotpatch policy to the group
+    # Assign the hotpatch policy to the group (single assignment object)
     assign_url = f"https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdatePolicies/{policy_id}/assignments"
     payload = {
-        "assignments": [
-            {
-                "target": {
-                    "@odata.type": "#microsoft.graph.groupAssignmentTarget",
-                    "groupId": group_id
-                }
-            }
-        ]
+        "target": {
+            "@odata.type": "#microsoft.graph.groupAssignmentTarget",
+            "groupId": group_id
+        }
     }
     resp = requests.post(assign_url, headers=headers, data=json.dumps(payload))
     if resp.status_code in (200, 201, 204):
