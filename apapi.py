@@ -1,7 +1,39 @@
+# ============================================================================
+# Windows Update Deployment Agent (Microsoft Graph API Automation Script)
+#
+# Description:
+#   Automates management and deployment of Windows Update, Expedite, Hotpatch,
+#   and Autopatch policies using Microsoft Graph API.
+#   Supports listing, creating, deploying, modifying, and removing update policies
+#   and assignments for Windows devices in Azure AD.
+#
+# Disclaimer:
+#   This script is provided as-is without warranty of any kind. Use at your own risk.
+#   Ensure you have the necessary Microsoft Graph API permissions and admin consent
+#   before running this script in a production environment.
+#
+# Author: Sabarimani Ramalingam
+# ============================================================================
+
+"""
+Windows Update Deployment Agent (apapi.py)
+
+This script provides a command-line interface for managing Windows Update deployment, expedite, hotpatch, and related policies via Microsoft Graph API.
+
+Author: Sabarimani Ramalingam
+Date: June 2025
+
+Disclaimer:
+This script is provided as-is without warranty of any kind. Use at your own risk. Ensure you have the necessary permissions and have reviewed the code before running in a production environment.
+"""
+
 import requests
 import json
 from textwrap import wrap
-from apapi_secrets import TENANT_ID, CLIENT_ID, CLIENT_SECRET
+
+TENANT_ID = 'cf4b33d5-05ec-4cc0-a302-b6a710f2ac60'
+CLIENT_ID = '1810ae5f-2a36-4098-ac0e-7aac7471b801'
+CLIENT_SECRET = 'qxr8Q~B-LCHlI-bV.C5bVUU9yutD86HVlIElEdxw'
 
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
 SCOPE = "https://graph.microsoft.com/.default"
@@ -394,29 +426,85 @@ def create_expedite_quality_update(access_token):
     else:
         print(f"Failed to create profile: {resp.status_code} {resp.text}")
 
-def assign_update_policy(access_token, policy_id, group_id):
+def deploy_expedite_quality_update(access_token):
     headers = {
         'Authorization': f'Bearer {access_token}',
         'Content-Type': 'application/json'
     }
-    payload = {
-        "target": {
-            "@odata.type": "#microsoft.graph.windowsUpdates.azureADDeviceGroup",
-            "groupId": group_id
-        }
-    }
-    url = f"https://graph.microsoft.com/beta/admin/windows/updates/updatePolicies/{policy_id}/assignments"
-    response = requests.post(url, headers=headers, data=json.dumps(payload))
-    if response.status_code in (200, 201, 204):
-        print("Assignment created successfully.")
-    else:
-        print(f"Failed to assign policy: {response.status_code} {response.text}")
-
-def assign_quality_update_profile(access_token, profile_id, group_id):
-    headers = {
-        'Authorization': f'Bearer {access_token}',
-        'Content-Type': 'application/json'
-    }
+    # Step 1: List available expedite quality update profiles
+    url = "https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdateProfiles"
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    profiles = response.json().get('value', [])
+    if not profiles:
+        print("No Expedite Quality Update Profiles found. Please create one first.")
+        return
+    print("Available Expedite Quality Update Profiles:")
+    print(f"{'No.':3} {'Display Name':40} | {'Expedite Update Settings':40} | {'Created':20}")
+    print("-"*110)
+    for idx, profile in enumerate(profiles, 1):
+        display_name = profile.get('displayName', '-')[:40]
+        created = profile.get('createdDateTime', '-')
+        expedited_settings = profile.get('expeditedUpdateSettings', {})
+        if expedited_settings:
+            settings_str = json.dumps(expedited_settings, separators=(',', ':'))
+        else:
+            settings_str = '-'
+        print(f"{idx:3} {display_name:40} | {settings_str:40} | {created:20}")
+    cancel_option = len(profiles) + 1
+    print(f"{cancel_option}. Cancel")
+    # Step 2: Ask user to select a profile or cancel
+    while True:
+        sel = input(f"Enter the number of the Expedite Quality Update profile to deploy (or {cancel_option} to cancel): ").strip()
+        if sel == str(cancel_option):
+            print("Operation cancelled.")
+            return
+        if sel.isdigit() and 1 <= int(sel) <= len(profiles):
+            selected_profile = profiles[int(sel)-1]
+            break
+        else:
+            print("Invalid selection. Try again.")
+    profile_id = selected_profile.get('id')
+    # Step 3: Ask for group deployment method
+    use_existing = input("Do you want to use an existing Azure AD group? (yes/no): ").strip().lower()
+    if use_existing in ("yes", "y"):
+        groups = get_existing_groups(access_token)
+        if not groups:
+            print("No groups found. You must create a new group.")
+            use_existing = "no"
+        else:
+            print("Available groups:")
+            for idx, g in enumerate(groups, 1):
+                print(f"{idx}. {g['displayName']} (ID: {g['id']})")
+            while True:
+                sel = input("Enter the number of the group to use, or type the group ID directly: ").strip()
+                if sel.isdigit() and 1 <= int(sel) <= len(groups):
+                    group_id = groups[int(sel)-1]['id']
+                    break
+                elif any(g['id'] == sel for g in groups):
+                    group_id = sel
+                    break
+                else:
+                    print("Invalid selection. Try again.")
+    if use_existing not in ("yes", "y"):
+        while True:
+            group_name = input("Enter Azure AD group name to create for deployment: ").strip()
+            if not group_name:
+                print("Group name cannot be empty.")
+                continue
+            try:
+                group_id = create_aad_group(access_token, group_name)
+                break
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 403:
+                    print("ERROR: 403 Forbidden. Your app registration likely lacks Group.ReadWrite.All (application) permission.\n"
+                          "Please grant this permission and admin consent in Azure AD, then try again.")
+                    return
+                else:
+                    print(f"Failed to create group: {e}")
+                    return
+    # Step 4: Assign the profile to the group
+    assign_url = f"https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdateProfiles/{profile_id}/assignments"
     payload = {
         "assignments": [
             {
@@ -427,146 +515,11 @@ def assign_quality_update_profile(access_token, profile_id, group_id):
             }
         ]
     }
-    url = f"https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdateProfiles/{profile_id}/assignments"
-    response = requests.post(url, headers=headers, data=json.dumps(payload))
-    if response.status_code in (200, 201, 204):
-        print("Assignment to group created successfully.")
+    resp = requests.post(assign_url, headers=headers, data=json.dumps(payload))
+    if resp.status_code in (200, 201, 204):
+        print("Expedite quality update profile assigned to group successfully.")
     else:
-        print(f"Failed to assign profile: {response.status_code} {response.text}")
-
-def deploy_expedite_quality_update(access_token):
-    headers = {
-        'Authorization': f'Bearer {access_token}',
-        'Content-Type': 'application/json'
-    }
-    url = "https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdateProfiles"
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()
-    profiles = response.json().get('value', [])
-    if not profiles:
-        print("No Expedite Quality Update Profiles found. Please create one first.")
-        return
-    print("Available Expedite Quality Update Profiles:")
-    for idx, profile in enumerate(profiles, 1):
-        print(f"{idx}. {profile.get('displayName', '-')[:40]} (ID: {profile.get('id')})")
-    print(f"{len(profiles)+1}. Cancel")
-    while True:
-        sel = input(f"Select a profile to assign (1-{len(profiles)+1}): ").strip()
-        if sel == str(len(profiles)+1):
-            print("Operation cancelled.")
-            return
-        if sel.isdigit() and 1 <= int(sel) <= len(profiles):
-            selected_profile = profiles[int(sel)-1]
-            break
-        else:
-            print("Invalid selection. Try again.")
-    policy_id = selected_profile.get('id')
-    use_existing = input("Do you want to use an existing Azure AD group? (yes/no): ").strip().lower()
-    if use_existing in ("yes", "y"):
-        groups = get_existing_groups(access_token)
-        if not groups:
-            print("No groups found. You must create a new group.")
-            use_existing = "no"
-        else:
-            print("Available groups:")
-            for idx, g in enumerate(groups, 1):
-                print(f"{idx}. {g['displayName']} (ID: {g['id']})")
-            while True:
-                sel = input("Enter the number of the group to use, or type the group ID directly: ").strip()
-                if sel.isdigit() and 1 <= int(sel) <= len(groups):
-                    group_id = groups[int(sel)-1]['id']
-                    break
-                elif any(g['id'] == sel for g in groups):
-                    group_id = sel
-                    break
-                else:
-                    print("Invalid selection. Try again.")
-    if use_existing not in ("yes", "y"):
-        while True:
-            group_name = input("Enter Azure AD group name to create for assignment: ").strip()
-            if not group_name:
-                print("Group name cannot be empty.")
-                continue
-            try:
-                group_id = create_aad_group(access_token, group_name)
-                break
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 403:
-                    print("ERROR: 403 Forbidden. Your app registration likely lacks Group.ReadWrite.All (application) permission.\n"
-                          "Please grant this permission and admin consent in Azure AD, then try again.")
-                    return
-                else:
-                    print(f"Failed to create group: {e}")
-                    return
-    print(f"Assigning profile {policy_id} to group {group_id} via /assignments endpoint...")
-    assign_quality_update_profile(access_token, policy_id, group_id)
-
-def deploy_hotpatch_policy(access_token):
-    headers = {
-        'Authorization': f'Bearer {access_token}',
-        'Content-Type': 'application/json'
-    }
-    url = "https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdatePolicies"
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()
-    policies = response.json().get('value', [])
-    if not policies:
-        print("No Hotpatch Policies found.")
-        return
-    print("Available Hotpatch Policies:")
-    for idx, policy in enumerate(policies, 1):
-        print(f"{idx}. {policy.get('displayName', '-')[:40]} (ID: {policy.get('id')})")
-    print(f"{len(policies)+1}. Cancel")
-    while True:
-        sel = input(f"Select a policy to assign (1-{len(policies)+1}): ").strip()
-        if sel == str(len(policies)+1):
-            print("Operation cancelled.")
-            return
-        if sel.isdigit() and 1 <= int(sel) <= len(policies):
-            selected_policy = policies[int(sel)-1]
-            break
-        else:
-            print("Invalid selection. Try again.")
-    policy_id = selected_policy.get('id')
-    use_existing = input("Do you want to use an existing Azure AD group? (yes/no): ").strip().lower()
-    if use_existing in ("yes", "y"):
-        groups = get_existing_groups(access_token)
-        if not groups:
-            print("No groups found. You must create a new group.")
-            use_existing = "no"
-        else:
-            print("Available groups:")
-            for idx, g in enumerate(groups, 1):
-                print(f"{idx}. {g['displayName']} (ID: {g['id']})")
-            while True:
-                sel = input("Enter the number of the group to use, or type the group ID directly: ").strip()
-                if sel.isdigit() and 1 <= int(sel) <= len(groups):
-                    group_id = groups[int(sel)-1]['id']
-                    break
-                elif any(g['id'] == sel for g in groups):
-                    group_id = sel
-                    break
-                else:
-                    print("Invalid selection. Try again.")
-    if use_existing not in ("yes", "y"):
-        while True:
-            group_name = input("Enter Azure AD group name to create for assignment: ").strip()
-            if not group_name:
-                print("Group name cannot be empty.")
-                continue
-            try:
-                group_id = create_aad_group(access_token, group_name)
-                break
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 403:
-                    print("ERROR: 403 Forbidden. Your app registration likely lacks Group.ReadWrite.All (application) permission.\n"
-                          "Please grant this permission and admin consent in Azure AD, then try again.")
-                    return
-                else:
-                    print(f"Failed to create group: {e}")
-                    return
-    print(f"Assigning policy {policy_id} to group {group_id}...")
-    assign_update_policy(access_token, policy_id, group_id)
+        print(f"Failed to assign profile: {resp.status_code} {resp.text}")
 
 def list_configuration_policies(access_token):
     headers = {
@@ -743,6 +696,84 @@ def create_hotpatch_policy(access_token):
         print(f"Hotpatch Policy '{policy_name}' created successfully.")
     else:
         print(f"Failed to create Hotpatch Policy: {response.status_code} {response.text}")
+
+def deploy_hotpatch_policy(access_token):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    url = "https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdatePolicies"
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    policies = response.json().get('value', [])
+    if not policies:
+        print("No Hotpatch Policies found.")
+        return
+    print("Available Hotpatch Policies:")
+    for idx, policy in enumerate(policies, 1):
+        print(f"{idx}. {policy.get('displayName', '-')[:40]} (ID: {policy.get('id')})")
+    print(f"{len(policies)+1}. Cancel")
+    while True:
+        sel = input(f"Select a policy to assign to a group (1-{len(policies)+1}): ").strip()
+        if sel == str(len(policies)+1):
+            print("Operation cancelled.")
+            return
+        if sel.isdigit() and 1 <= int(sel) <= len(policies):
+            selected_policy = policies[int(sel)-1]
+            break
+        else:
+            print("Invalid selection. Try again.")
+    policy_id = selected_policy.get('id')
+    use_existing = input("Do you want to use an existing Azure AD group? (yes/no): ").strip().lower()
+    if use_existing in ("yes", "y"):
+        groups = get_existing_groups(access_token)
+        if not groups:
+            print("No groups found. You must create a new group.")
+            use_existing = "no"
+        else:
+            print("Available groups:")
+            for idx, g in enumerate(groups, 1):
+                print(f"{idx}. {g['displayName']} (ID: {g['id']})")
+            while True:
+                sel = input("Enter the number of the group to use, or type the group ID directly: ").strip()
+                if sel.isdigit() and 1 <= int(sel) <= len(groups):
+                    group_id = groups[int(sel)-1]['id']
+                    break
+                elif any(g['id'] == sel for g in groups):
+                    group_id = sel
+                    break
+                else:
+                    print("Invalid selection. Try again.")
+    if use_existing not in ("yes", "y"):
+        while True:
+            group_name = input("Enter Azure AD group name to create for deployment: ").strip()
+            if not group_name:
+                print("Group name cannot be empty.")
+                continue
+            try:
+                group_id = create_aad_group(access_token, group_name)
+                break
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 403:
+                    print("ERROR: 403 Forbidden. Your app registration likely lacks Group.ReadWrite.All (application) permission.\n"
+                          "Please grant this permission and admin consent in Azure AD, then try again.")
+                    return
+                else:
+                    print(f"Failed to create group: {e}")
+                    return
+    # Assign the hotpatch policy to the group (single assignment object)
+    assign_url = f"https://graph.microsoft.com/beta/deviceManagement/windowsQualityUpdatePolicies/{policy_id}/assignments"
+    payload = {
+        "target": {
+            "@odata.type": "#microsoft.graph.groupAssignmentTarget",
+            "groupId": group_id
+        }
+    }
+    resp = requests.post(assign_url, headers=headers, data=json.dumps(payload))
+    if resp.status_code in (200, 201, 204):
+        print("Hotpatch policy assigned to group successfully.")
+    else:
+        print(f"Failed to assign hotpatch policy: {resp.status_code} {resp.text}")
 
 def modify_expedite_policy(access_token):
     headers = {
